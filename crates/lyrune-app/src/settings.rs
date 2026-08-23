@@ -61,6 +61,35 @@ pub enum LyricFrameRate {
     Display,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrayIconStyle {
+    Light,
+    Dark,
+    #[default]
+    Color,
+}
+
+impl TrayIconStyle {
+    pub const ALL: [Self; 3] = [Self::Light, Self::Dark, Self::Color];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Light => "tray-icon-light",
+            Self::Dark => "tray-icon-dark",
+            Self::Color => "tray-icon-color",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Light => "亮色",
+            Self::Dark => "暗色",
+            Self::Color => "彩色",
+        }
+    }
+}
+
 impl LyricFrameRate {
     pub const ALL: [Self; 5] = [
         Self::Fps30,
@@ -119,6 +148,7 @@ pub struct AppSettings {
     pub volume: f32,
     pub last_nonzero_volume: f32,
     pub color_theme: ColorTheme,
+    pub tray_icon_style: TrayIconStyle,
     pub ui_font_families: Vec<String>,
     pub monospace_font_families: Vec<String>,
     pub lyric_font_families: Vec<String>,
@@ -141,6 +171,7 @@ impl Default for AppSettings {
             volume: 1.,
             last_nonzero_volume: 1.,
             color_theme: ColorTheme::default(),
+            tray_icon_style: TrayIconStyle::default(),
             ui_font_families: default_ui_font_families(),
             monospace_font_families: default_monospace_font_families(),
             lyric_font_families: default_lyric_font_families(),
@@ -431,6 +462,7 @@ mod tests {
         assert_eq!(settings.volume, 1.);
         assert_eq!(settings.last_nonzero_volume, 1.);
         assert_eq!(settings.color_theme, ColorTheme::EverforestLight);
+        assert_eq!(settings.tray_icon_style, TrayIconStyle::Color);
         assert_eq!(settings.ui_font_families, [".SystemUIFont"]);
         assert_eq!(
             settings.monospace_font_families,
@@ -466,6 +498,7 @@ mod tests {
             volume: 2.,
             last_nonzero_volume: -1.,
             color_theme: ColorTheme::CatppuccinMocha,
+            tray_icon_style: TrayIconStyle::Light,
             ui_font_families: default_ui_font_families(),
             monospace_font_families: default_monospace_font_families(),
             lyric_font_families: default_lyric_font_families(),
@@ -503,6 +536,7 @@ mod tests {
             volume: 0.37,
             last_nonzero_volume: 0.64,
             color_theme: ColorTheme::EverforestDark,
+            tray_icon_style: TrayIconStyle::Dark,
             ui_font_families: vec!["Inter".to_owned(), "Noto Sans CJK SC".to_owned()],
             monospace_font_families: vec!["JetBrains Mono".to_owned()],
             lyric_font_families: vec!["LXGW WenKai".to_owned(), "Noto Sans JP".to_owned()],
@@ -543,6 +577,7 @@ mod tests {
         assert_eq!(restored.volume, expected.volume);
         assert_eq!(restored.last_nonzero_volume, expected.last_nonzero_volume);
         assert_eq!(restored.color_theme, expected.color_theme);
+        assert_eq!(restored.tray_icon_style, expected.tray_icon_style);
         assert_eq!(restored.ui_font_families, expected.ui_font_families);
         assert_eq!(
             restored.monospace_font_families,

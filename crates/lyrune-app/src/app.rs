@@ -51,8 +51,8 @@ use crate::settings::{
     AppSettings, CdnCacheStore, DEFAULT_NAVIGATION_HISTORY_LIMIT, LibraryCache, LyricFrameRate,
     MAX_IMAGE_CACHE_CAPACITY, MAX_NAVIGATION_HISTORY_LIMIT, PersistedLibraryView,
     PersistedPlayback, PersistedQueueContinuation, PersistedWindowSize, SettingsStore,
-    default_lyric_font_families, default_monospace_font_families, default_ui_font_families,
-    parse_font_families,
+    TrayIconStyle, default_lyric_font_families, default_monospace_font_families,
+    default_ui_font_families, parse_font_families,
 };
 use crate::singleflight::SingleFlight;
 use qqmusic_api::integration::{
@@ -5499,6 +5499,16 @@ impl LyruneView {
         cx.notify();
     }
 
+    fn set_tray_icon_style(&mut self, style: TrayIconStyle, cx: &mut Context<Self>) {
+        if self.settings.tray_icon_style == style {
+            return;
+        }
+        self.settings.tray_icon_style = style;
+        crate::set_tray_icon_style(style, cx);
+        self.persist_settings();
+        cx.notify();
+    }
+
     fn set_preferred_playback_quality(&mut self, quality: Quality, cx: &mut Context<Self>) {
         if self.settings.playback_quality == quality {
             return;
@@ -6479,6 +6489,21 @@ impl LyruneView {
                     }))
             })
             .collect::<Vec<_>>();
+        let selected_tray_icon_style = self.settings.tray_icon_style;
+        let tray_icon_buttons = TrayIconStyle::ALL
+            .into_iter()
+            .map(|style| {
+                Button::new(style.id())
+                    .label(style.label())
+                    .ghost()
+                    .flex_1()
+                    .h(px(38.))
+                    .selected(selected_tray_icon_style == style)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.set_tray_icon_style(style, cx)),
+                    )
+            })
+            .collect::<Vec<_>>();
         let preferred_quality = self.settings.playback_quality;
         let quality_rows = Quality::ALL
             .chunks(2)
@@ -6561,6 +6586,26 @@ impl LyruneView {
                                         .gap_2()
                                         .child(div().font_medium().child("主题配色"))
                                         .children(theme_rows),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_2()
+                                        .pt_4()
+                                        .border_t_1()
+                                        .border_color(theme.border)
+                                        .child(div().font_medium().child("托盘图标"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child("亮色为白底黑标，暗色为黑底白标"),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .gap_1()
+                                                .children(tray_icon_buttons),
+                                        ),
                                 )
                                 .child(
                                     v_flex()

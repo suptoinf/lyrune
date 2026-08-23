@@ -21,7 +21,7 @@ use std::time::Duration;
 use app::LyruneView;
 use gpui::*;
 use gpui_component::Root;
-use settings::{PersistedWindowSize, SettingsStore};
+use settings::{PersistedWindowSize, SettingsStore, TrayIconStyle};
 use tray::TrayCommand;
 
 const DEFAULT_WINDOW_WIDTH: f32 = 1080.;
@@ -70,6 +70,12 @@ struct TrayState {
 }
 
 impl Global for TrayState {}
+
+pub(crate) fn set_tray_icon_style(style: TrayIconStyle, cx: &App) {
+    if let Some(state) = cx.try_global::<TrayState>() {
+        let _ = state._tray.set_style(style);
+    }
+}
 
 #[cfg(target_os = "linux")]
 struct MprisState {
@@ -140,7 +146,7 @@ fn main() {
             );
             design::apply(settings.color_theme, &fonts, None, cx);
             let (tray_commands, tray_events) = async_channel::unbounded();
-            let tray_available = match tray::install(tray_commands) {
+            let tray_available = match tray::install(tray_commands, settings.tray_icon_style) {
                 Ok(tray) => {
                     cx.set_global(TrayState { _tray: tray });
                     true

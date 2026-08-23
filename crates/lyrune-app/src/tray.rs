@@ -1,8 +1,12 @@
 use anyhow::Result;
 use async_channel::Sender;
 
+use crate::settings::TrayIconStyle;
+
 const ICON_SIZE: u32 = 64;
 pub(crate) const ICON_SVG: &[u8] = include_bytes!("../assets/lyrune.svg");
+const LIGHT_ICON_SVG: &[u8] = include_bytes!("../assets/lyrune-light.svg");
+const DARK_ICON_SVG: &[u8] = include_bytes!("../assets/lyrune-dark.svg");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TrayCommand {
@@ -10,8 +14,13 @@ pub enum TrayCommand {
     Quit,
 }
 
-fn icon_rgba() -> Vec<u8> {
-    let tree = resvg::usvg::Tree::from_data(ICON_SVG, &resvg::usvg::Options::default())
+fn icon_rgba(style: TrayIconStyle) -> Vec<u8> {
+    let svg = match style {
+        TrayIconStyle::Light => LIGHT_ICON_SVG,
+        TrayIconStyle::Dark => DARK_ICON_SVG,
+        TrayIconStyle::Color => ICON_SVG,
+    };
+    let tree = resvg::usvg::Tree::from_data(svg, &resvg::usvg::Options::default())
         .expect("parse Lyrune tray icon");
     let mut pixmap =
         resvg::tiny_skia::Pixmap::new(ICON_SIZE, ICON_SIZE).expect("allocate Lyrune tray icon");
@@ -42,7 +51,19 @@ mod platform {
     use ksni::blocking::TrayMethods as _;
     use ksni::menu::{MenuItem, StandardItem};
 
-    use super::{ICON_SIZE, TrayCommand, icon_rgba};
+    use super::{ICON_SIZE, TrayCommand, TrayIconStyle, icon_rgba};
+
+    fn icon(style: TrayIconStyle) -> ksni::Icon {
+        let mut data = icon_rgba(style);
+        for pixel in data.chunks_exact_mut(4) {
+            pixel.rotate_right(1);
+        }
+        ksni::Icon {
+            width: ICON_SIZE as i32,
+            height: ICON_SIZE as i32,
+            data,
+        }
+    }
 
     struct LinuxTray {
         commands: Sender<TrayCommand>,
@@ -97,24 +118,22 @@ mod platform {
     }
 
     impl DesktopTray {
-        pub fn install(commands: Sender<TrayCommand>) -> Result<Self> {
-            let mut data = icon_rgba();
-            for pixel in data.chunks_exact_mut(4) {
-                pixel.rotate_right(1);
-            }
+        pub fn install(commands: Sender<TrayCommand>, style: TrayIconStyle) -> Result<Self> {
             let tray = LinuxTray {
                 commands,
-                icon: ksni::Icon {
-                    width: ICON_SIZE as i32,
-                    height: ICON_SIZE as i32,
-                    data,
-                },
+                icon: icon(style),
             };
             let handle = tray
                 .assume_sni_available(true)
                 .spawn()
                 .context("无法注册 Linux 系统托盘图标")?;
             Ok(Self { handle })
+        }
+
+        pub fn set_style(&self, style: TrayIconStyle) -> Result<()> {
+            let icon = icon(style);
+            self.handle.update(|tray| tray.icon = icon);
+            Ok(())
         }
     }
 
@@ -134,14 +153,14 @@ mod platform {
         Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
     };
 
-    use super::{ICON_SIZE, TrayCommand, icon_rgba};
+    use super::{ICON_SIZE, TrayCommand, TrayIconStyle, icon_rgba};
 
     pub struct DesktopTray {
         _icon: TrayIcon,
     }
 
     impl DesktopTray {
-        pub fn install(commands: Sender<TrayCommand>) -> Result<Self> {
+        pub fn install(commands: Sender<TrayCommand>, style: TrayIconStyle) -> Result<Self> {
             let menu = Menu::new();
             let show = MenuItem::new("打开 Lyrune", true, None);
             let quit = MenuItem::new("退出", true, None);
@@ -178,7 +197,7 @@ mod platform {
                 }
             }));
 
-            let icon = Icon::from_rgba(icon_rgba(), ICON_SIZE, ICON_SIZE)
+            let icon = Icon::from_rgba(icon_rgba(style), ICON_SIZE, ICON_SIZE)
                 .context("无法创建系统托盘图标")?;
             let icon = TrayIconBuilder::new()
                 .with_tooltip("Lyrune")
@@ -189,13 +208,21 @@ mod platform {
                 .context("无法注册系统托盘图标")?;
             Ok(Self { _icon: icon })
         }
+
+        pub fn set_style(&self, style: TrayIconStyle) -> Result<()> {
+            let icon = Icon::from_rgba(icon_rgba(style), ICON_SIZE, ICON_SIZE)
+                .context("无法创建系统托盘图标")?;
+            self._icon
+                .set_icon(Some(icon))
+                .context("无法更新系统托盘图标")
+        }
     }
 }
 
 pub use platform::DesktopTray;
 
-pub fn install(commands: Sender<TrayCommand>) -> Result<DesktopTray> {
-    DesktopTray::install(commands)
+pub fn install(commands: Sender<TrayCommand>, style: TrayIconStyle) -> Result<DesktopTray> {
+    DesktopTray::install(commands, style)
 }
 
 #[cfg(test)]
@@ -204,15 +231,19 @@ mod tests {
 
     #[test]
     fn generated_icon_has_expected_geometry() {
-        let icon = icon_rgba();
-        assert_eq!(icon.len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
+        for style in TrayIconStyle::ALL {
+            let icon = icon_rgba(style);
+            assert_eq!(icon.len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
 
-        let pixel = |x: u32, y: u32| {
-            let start = ((y * ICON_SIZE + x) * 4) as usize;
-            &icon[start..start + 4]
-        };
-        assert_eq!(pixel(0, 0), [0, 0, 0, 0]);
-        assert_eq!(pixel(32, 32)[3], 255);
+            let pixel = |x: u32, y: u32| {
+                let start = ((y * ICON_SIZE + x) * 4) as usize;
+                &icon[start..start + 4]
+            };
+            assert_eq!(pixel(0, 0), [0, 0, 0, 0]);
+            assert_eq!(pixel(32, 32)[3], 255);
+        }
+
+        let icon = icon_rgba(TrayIconStyle::Color);
         assert!(
             icon.chunks_exact(4)
                 .filter(|pixel| pixel[3] == 255)
