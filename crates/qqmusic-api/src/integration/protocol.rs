@@ -18,9 +18,9 @@ use crate::models::LyricResult;
 use crate::platform::get_search_id;
 
 use super::{
-    CredentialSession, PlaybackOption, PlaylistPage, QqCredential, Quality, RadarTrackPage,
-    SearchAlbum, SearchArtist, SearchPage, SearchResults, Track, UserPlaylist, UserPlaylistId,
-    UserProfile, new_client_guid, qrc_des,
+    CredentialError, CredentialSession, PlaybackOption, PlaylistPage, QqCredential, Quality,
+    RadarTrackPage, SearchAlbum, SearchArtist, SearchPage, SearchResults, Track, UserPlaylist,
+    UserPlaylistId, UserProfile, is_credential_rejected, new_client_guid, qrc_des,
 };
 
 const API_URL: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
@@ -263,18 +263,35 @@ impl ProtocolClient {
         .map(|_| ())
     }
 
+    pub async fn validate_credential(&self, credential: &CredentialSession) -> Result<()> {
+        self.call(
+            "music.UserInfo.userInfoServer",
+            "GetLoginUserInfo",
+            json!({}),
+            credential,
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub async fn user_profile(&self, credential: &CredentialSession) -> Result<UserProfile> {
         let current = credential.ensure_fresh().await?;
-        let primary = self
-            .call_with_credential(
+        let primary = match self
+            .call_with_session(
                 "music.UserInfo.userInfoServer",
                 "GetLoginUserInfo",
                 json!({}),
+                credential,
                 &current,
                 None,
             )
             .await
-            .ok();
+        {
+            Ok(profile) => Some(profile),
+            Err(error) if is_credential_rejected(&error) => return Err(error),
+            Err(_) => None,
+        };
         let primary_is_complete = primary.as_ref().is_some_and(|profile| {
             find_string_recursively(profile, &["nickname", "nick", "userName"]).is_some()
                 && find_string_recursively(
@@ -359,10 +376,11 @@ impl ProtocolClient {
             integer_field(&liked_data, &["total_song_num", "total"]).unwrap_or_default();
 
         let created_data = self
-            .call_with_credential(
+            .call_with_session(
                 "music.musicasset.PlaylistBaseRead",
                 "GetPlaylistByUin",
                 json!({ "uin": current.music_id.to_string() }),
+                credential,
                 &current,
                 None,
             )
@@ -379,7 +397,7 @@ impl ProtocolClient {
         let mut offset = 0_u64;
         loop {
             let data = self
-                .call_with_credential(
+                .call_with_session(
                     "music.musicasset.PlaylistFavRead",
                     "CgiGetPlaylistFavInfo",
                     json!({
@@ -387,6 +405,7 @@ impl ProtocolClient {
                         "offset": offset,
                         "size": 100,
                     }),
+                    credential,
                     &current,
                     None,
                 )
@@ -849,7 +868,7 @@ impl ProtocolClient {
         let song_mid = vec![track.mid.clone(); requests.len()];
         let song_type = vec![0; requests.len()];
         let data = self
-            .call_with_credential(
+            .call_with_session(
                 "music.vkey.GetVkey",
                 "UrlGetVkey",
                 json!({
@@ -860,6 +879,7 @@ impl ProtocolClient {
                     "uin": current.music_id.to_string(),
                     "ctx": 0,
                 }),
+                credential,
                 &current,
                 None,
             )
@@ -993,10 +1013,11 @@ impl ProtocolClient {
                 .expect("playlist params are always an object")
                 .insert("enc_host_uin".to_owned(), encrypted_uin.into());
         }
-        self.call_with_credential(
+        self.call_with_session(
             "music.srfDissInfo.DissInfo",
             "CgiGetDiss",
             param,
+            credential,
             &current,
             None,
         )
@@ -1121,9 +1142,27 @@ impl ProtocolClient {
         credential: &CredentialSession,
         comm_overrides: Option<Value>,
     ) -> Result<Value> {
-        let credential = credential.ensure_fresh().await?;
-        self.call_with_credential(module, method, param, &credential, comm_overrides)
+        let current = credential.ensure_fresh().await?;
+        self.call_with_session(module, method, param, credential, &current, comm_overrides)
             .await
+    }
+
+    async fn call_with_session(
+        &self,
+        module: &str,
+        method: &str,
+        param: Value,
+        credential: &CredentialSession,
+        current: &QqCredential,
+        comm_overrides: Option<Value>,
+    ) -> Result<Value> {
+        let result = self
+            .call_with_credential(module, method, param, current, comm_overrides)
+            .await;
+        if let Err(error) = &result {
+            credential.revoke_if_rejected(error);
+        }
+        result
     }
 
     async fn call_with_credential(
@@ -1208,6 +1247,9 @@ impl ProtocolClient {
 
         let global_code = integer_field(&response, &["code"]).unwrap_or_default();
         if global_code != 0 {
+            if is_credential_rejection_code(global_code) {
+                return Err(CredentialError::Rejected { code: global_code }.into());
+            }
             bail!("QQ 音乐网关返回错误码 {global_code}");
         }
 
@@ -1216,6 +1258,9 @@ impl ProtocolClient {
             .context("QQ 音乐网关响应缺少 result")?;
         let result_code = integer_field(result, &["code"]).unwrap_or_default();
         if result_code != 0 {
+            if is_credential_rejection_code(result_code) {
+                return Err(CredentialError::Rejected { code: result_code }.into());
+            }
             bail!("QQ 音乐业务接口返回错误码 {result_code}");
         }
 
@@ -1224,6 +1269,10 @@ impl ProtocolClient {
             .cloned()
             .context("QQ 音乐网关响应缺少 data")
     }
+}
+
+fn is_credential_rejection_code(code: u64) -> bool {
+    matches!(code, 1000 | 104_400 | 104_401)
 }
 
 fn apply_credential_response(credential: &mut QqCredential, data: &Value) {
@@ -2134,6 +2183,16 @@ mod tests {
     fn qq_signature_matches_upstream_vector() {
         let body = json!({ "foo": "bar", "num": 1 });
         assert_eq!(sign(&body), "zzcf3ea51dcp3xdwnxisjgufsk0znclehf2t85bc1d3d4");
+    }
+
+    #[test]
+    fn classifies_only_confirmed_credential_rejection_codes() {
+        for code in [1000, 104_400, 104_401] {
+            assert!(is_credential_rejection_code(code));
+        }
+        for code in [0, 20279, 24001, 50006] {
+            assert!(!is_credential_rejection_code(code));
+        }
     }
 
     #[test]

@@ -24,8 +24,17 @@ const QR_DATA_PREFIX: &str = "data:image/png;base64,";
 pub enum CredentialError {
     #[error("QQ 音乐凭证已过期，且 Lyrune 旧版本保存的凭据缺少必要字段，请重新登录")]
     IncompleteLegacyCredential,
+    #[error("QQ 音乐登录凭据已失效（错误码 {code}），请重新登录")]
+    Rejected { code: u64 },
     #[error("QQ 音乐登录凭据已注销")]
     Revoked,
+}
+
+pub(crate) fn is_credential_rejected(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<CredentialError>(),
+        Some(CredentialError::Rejected { .. })
+    )
 }
 
 #[derive(Clone)]
@@ -69,6 +78,12 @@ impl CredentialSession {
             self.notify_update();
         }
         credential
+    }
+
+    fn revoke_if_rejected(&self, error: &anyhow::Error) {
+        if is_credential_rejected(error) {
+            self.revoke();
+        }
     }
 
     pub async fn ensure_fresh(&self) -> Result<Arc<QqCredential>> {
@@ -740,6 +755,23 @@ mod tests {
             Some(CredentialError::Revoked)
         ));
         assert!(session.snapshot().is_none());
+    }
+
+    #[test]
+    fn credential_session_revokes_only_for_explicit_server_rejection() {
+        use anyhow::Context as _;
+
+        let rejected = CredentialSession::new(refreshable_expiring_credential());
+        let error = Err::<(), _>(CredentialError::Rejected { code: 104_401 })
+            .context("读取用户资料失败")
+            .expect_err("credential rejection");
+        rejected.revoke_if_rejected(&error);
+        assert!(rejected.snapshot().is_none());
+
+        let transient = CredentialSession::new(refreshable_expiring_credential());
+        let error = anyhow::anyhow!("temporary network failure");
+        transient.revoke_if_rejected(&error);
+        assert!(transient.snapshot().is_some());
     }
 
     #[test]

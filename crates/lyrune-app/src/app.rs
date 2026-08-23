@@ -3149,6 +3149,7 @@ impl LyruneView {
                             return false;
                         }
                         let Some(current) = credential.snapshot() else {
+                            this.handle_credential_rejected(cx);
                             return false;
                         };
                         this.persist_credential(current.as_ref().clone(), cx);
@@ -3159,6 +3160,49 @@ impl LyruneView {
                     break;
                 }
             }
+        })
+        .detach();
+    }
+
+    fn validate_cached_credential(&mut self, cx: &mut Context<Self>) {
+        let Some(credential) = self.credential.clone() else {
+            return;
+        };
+        let Some(client) = self.protocol_client.clone() else {
+            return;
+        };
+        let generation = self.login_generation;
+        let (sender, receiver) = async_channel::bounded(1);
+        let task_credential = credential.clone();
+        drop(RUNTIME.spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_secs(30),
+                client.validate_credential(&task_credential),
+            )
+            .await
+            .context("QQ 音乐登录凭据验证等待超过 30 秒")
+            .and_then(|result| result);
+            let _ = sender.send(result).await;
+        }));
+
+        cx.spawn(async move |this, cx| {
+            let Ok(Err(error)) = receiver.recv().await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.login_generation != generation
+                    || credential.snapshot().is_none()
+                    || this
+                        .credential
+                        .as_ref()
+                        .is_none_or(|current| !current.ptr_eq(&credential))
+                {
+                    return;
+                }
+                this.status =
+                    StatusMessage::error(format!("暂时无法验证 QQ 音乐登录凭据：{error:#}"));
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -3933,6 +3977,7 @@ impl LyruneView {
         {
             self.library_loading = false;
             self.apply_library(account_id, profile, playlists, false, cx);
+            self.validate_cached_credential(cx);
             return;
         }
         let Some(client) = self.protocol_client.clone() else {
@@ -6179,6 +6224,23 @@ impl LyruneView {
                 let _ = client.logout(&credential).await;
             }));
         }
+        self.clear_account_session(StatusMessage::info("已退出登录"), true, cx);
+    }
+
+    fn handle_credential_rejected(&mut self, cx: &mut Context<Self>) {
+        self.clear_account_session(
+            StatusMessage::error("QQ 音乐登录凭据已失效，请重新登录"),
+            false,
+            cx,
+        );
+    }
+
+    fn clear_account_session(
+        &mut self,
+        status: StatusMessage,
+        restart_login: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.login_generation = self.login_generation.wrapping_add(1);
         self.library_generation = self.library_generation.wrapping_add(1);
         self.home_generation = self.home_generation.wrapping_add(1);
@@ -6238,8 +6300,12 @@ impl LyruneView {
             table.refresh(cx);
             cx.notify();
         });
-        self.status = StatusMessage::info("已退出登录");
-        self.begin_login(cx);
+        self.status = status;
+        if restart_login {
+            self.begin_login(cx);
+        } else {
+            cx.notify();
+        }
 
         drop(RUNTIME.spawn(async move {
             let _ = tokio::task::spawn_blocking(CredentialStore::delete).await;
