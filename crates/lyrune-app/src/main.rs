@@ -1,4 +1,6 @@
 mod app;
+#[cfg(target_os = "linux")]
+mod bluetooth_lyrics;
 mod cache;
 mod credentials;
 mod design;
@@ -174,7 +176,11 @@ fn main() {
                 .take()
                 .expect("Lyrune view was created with its window");
 
-            view.update(cx, |view, cx| view.start_background_tick(cx));
+            view.update(cx, |view, cx| {
+                view.start_background_tick(cx);
+                #[cfg(target_os = "linux")]
+                view.start_bluetooth_lyrics(cx);
+            });
 
             let main_window = Rc::new(RefCell::new(MainWindowState {
                 view,

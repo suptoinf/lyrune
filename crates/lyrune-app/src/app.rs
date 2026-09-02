@@ -2324,6 +2324,10 @@ pub struct LyruneView {
     #[cfg(target_os = "linux")]
     mpris: Option<MprisHandle>,
     #[cfg(target_os = "linux")]
+    bluetooth_lyrics: Option<crate::bluetooth_lyrics::BluetoothLyrics>,
+    #[cfg(target_os = "linux")]
+    bluetooth_lyrics_status: String,
+    #[cfg(target_os = "linux")]
     last_mpris_position_sync: Instant,
 }
 
@@ -2663,6 +2667,10 @@ impl LyruneView {
             next_lyric_scroll_frame: None,
             #[cfg(target_os = "linux")]
             mpris: None,
+            #[cfg(target_os = "linux")]
+            bluetooth_lyrics: None,
+            #[cfg(target_os = "linux")]
+            bluetooth_lyrics_status: "蓝牙歌词已关闭".into(),
             #[cfg(target_os = "linux")]
             last_mpris_position_sync: Instant::now(),
         };
@@ -4959,6 +4967,8 @@ impl LyruneView {
                                 }
                             }
                         }
+                        #[cfg(target_os = "linux")]
+                        this.sync_bluetooth_lyrics();
                         cx.notify();
                     })
                     .is_err()
@@ -5907,6 +5917,7 @@ impl LyruneView {
 
     #[cfg(target_os = "linux")]
     fn sync_mpris(&self, seeked: bool) {
+        self.sync_bluetooth_lyrics();
         let Some(mpris) = &self.mpris else {
             return;
         };
@@ -5920,6 +5931,7 @@ impl LyruneView {
 
     #[cfg(target_os = "linux")]
     fn sync_mpris_position(&self) {
+        self.sync_bluetooth_lyrics();
         if let Some(mpris) = &self.mpris {
             mpris.update_position(duration_micros(self.position));
         }
@@ -6476,6 +6488,197 @@ impl LyruneView {
             .into_any_element()
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn start_bluetooth_lyrics(&mut self, cx: &mut Context<Self>) {
+        use crate::bluetooth_lyrics::{BluetoothLyrics, Event};
+        match BluetoothLyrics::start() {
+            Ok((service, events)) => {
+                self.bluetooth_lyrics = Some(service);
+                self.sync_bluetooth_lyrics();
+                cx.spawn(async move |this, cx| {
+                    while let Ok(event) = events.recv().await {
+                        if this
+                            .update(cx, |this, cx| match event {
+                                Event::Status(status) => {
+                                    this.bluetooth_lyrics_status = status;
+                                    cx.notify();
+                                }
+                                Event::Command(command) => this.handle_mpris_command(command, cx),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+            }
+            Err(error) => self.bluetooth_lyrics_status = format!("蓝牙歌词启动失败：{error:#}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sync_bluetooth_lyrics(&self) {
+        use crate::bluetooth_lyrics::{Snapshot, lyric_position};
+        let Some(service) = &self.bluetooth_lyrics else {
+            return;
+        };
+        if !self.settings.bluetooth_lyrics_enabled {
+            service.update(false, Snapshot::default());
+            return;
+        }
+        let mut snapshot = Snapshot {
+            stopped: true,
+            ..Default::default()
+        };
+        if let Some(track) = self.current_track_data() {
+            snapshot.track_id = track.mid.clone();
+            snapshot.artist = track.artists.clone();
+            snapshot.length_micros = duration_micros(Duration::from_secs(track.duration_seconds));
+            let loaded = self.loading_track.is_none() && self.playback_started;
+            let position = if loaded {
+                self.audio
+                    .as_ref()
+                    .map(AudioPlayer::position)
+                    .unwrap_or(self.position)
+            } else {
+                Duration::ZERO
+            };
+            snapshot.position_micros = duration_micros(position);
+            snapshot.playing = loaded && self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
+            snapshot.stopped = !loaded;
+            snapshot.title = self
+                .lyrics_cache
+                .get(&track.mid)
+                .filter(|_| loaded)
+                .and_then(|lyrics| {
+                    lyrics
+                        .parsed
+                        .active_index(lyric_position(
+                            position,
+                            self.settings.bluetooth_lyrics_offset_ms,
+                        ))
+                        .and_then(|index| lyrics.parsed.lines.get(index))
+                })
+                .map(|line| line.text.trim())
+                .filter(|text| !text.is_empty())
+                .unwrap_or(&track.title)
+                .to_owned();
+        }
+        service.update(self.settings.bluetooth_lyrics_enabled, snapshot);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn change_bluetooth_lyrics_offset(&mut self, delta: i32, cx: &mut Context<Self>) {
+        self.settings.bluetooth_lyrics_offset_ms =
+            (self.settings.bluetooth_lyrics_offset_ms + delta).clamp(-3000, 3000);
+        self.sync_bluetooth_lyrics();
+        self.persist_settings();
+        cx.notify();
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn render_bluetooth_lyrics_settings(&self, _cx: &mut Context<Self>) -> AnyElement {
+        div().into_any_element()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn render_bluetooth_lyrics_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        v_flex()
+            .gap_2()
+            .pt_4()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(div().font_medium().child("PixelBar 蓝牙歌词"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("连接 PixelBar 并设为音频输出，在 EDIFIER Connect 中开启音乐可视化。"),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("bluetooth-lyrics-toggle")
+                            .label(if self.settings.bluetooth_lyrics_enabled {
+                                "关闭蓝牙歌词"
+                            } else {
+                                "开启蓝牙歌词"
+                            })
+                            .outline()
+                            .disabled(self.bluetooth_lyrics.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings.bluetooth_lyrics_enabled =
+                                    !this.settings.bluetooth_lyrics_enabled;
+                                this.sync_bluetooth_lyrics();
+                                this.persist_settings();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("bluetooth-lyrics-test")
+                            .label("测试音响显示")
+                            .outline()
+                            .disabled(
+                                !self.settings.bluetooth_lyrics_enabled
+                                    || self.bluetooth_lyrics.is_none(),
+                            )
+                            .on_click(cx.listener(|this, _, _, _| {
+                                if let Some(service) = &this.bluetooth_lyrics {
+                                    service.test();
+                                }
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(self.bluetooth_lyrics_status.clone()),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().text_sm().child(format!(
+                        "歌词偏移：{:+} ms",
+                        self.settings.bluetooth_lyrics_offset_ms
+                    )))
+                    .child(
+                        Button::new("bluetooth-lyrics-earlier")
+                            .label("提前 100 ms")
+                            .ghost()
+                            .disabled(self.settings.bluetooth_lyrics_offset_ms <= -3000)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.change_bluetooth_lyrics_offset(-100, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("bluetooth-lyrics-later")
+                            .label("延后 100 ms")
+                            .ghost()
+                            .disabled(self.settings.bluetooth_lyrics_offset_ms >= 3000)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.change_bluetooth_lyrics_offset(100, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("bluetooth-lyrics-reset")
+                            .label("重置")
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.change_bluetooth_lyrics_offset(
+                                    -this.settings.bluetooth_lyrics_offset_ms,
+                                    cx,
+                                );
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_settings_page(&mut self, narrow: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let font_field = |label: &'static str, detail: &'static str, input: &Entity<InputState>| {
@@ -6772,6 +6975,7 @@ impl LyruneView {
                                             true,
                                         )),
                                 )
+                                .child(self.render_bluetooth_lyrics_settings(cx))
                                 .child(
                                     v_flex()
                                         .gap_2()

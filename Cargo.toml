@@ -42,6 +42,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 keyring = "4.1.6"
 ksni = { version = "0.3.6", features = ["blocking"] }
 md5 = "0.8"
+zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
 mpris-server = { version = "0.10.0", default-features = false, features = ["tokio"] }
 qrcode = "0.14.1"
 quick-xml = "0.41"

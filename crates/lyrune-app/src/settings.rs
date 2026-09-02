@@ -145,6 +145,8 @@ impl PersistedPlayback {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AppSettings {
+    pub bluetooth_lyrics_enabled: bool,
+    pub bluetooth_lyrics_offset_ms: i32,
     pub volume: f32,
     pub last_nonzero_volume: f32,
     pub color_theme: ColorTheme,
@@ -168,6 +170,8 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            bluetooth_lyrics_enabled: false,
+            bluetooth_lyrics_offset_ms: 0,
             volume: 1.,
             last_nonzero_volume: 1.,
             color_theme: ColorTheme::default(),
@@ -191,6 +195,7 @@ impl Default for AppSettings {
 
 impl AppSettings {
     fn normalized(mut self) -> Self {
+        self.bluetooth_lyrics_offset_ms = self.bluetooth_lyrics_offset_ms.clamp(-3000, 3000);
         self.volume = normalized_volume(self.volume, 1.);
         self.last_nonzero_volume = normalized_volume(self.last_nonzero_volume, 1.).max(0.01);
         self.ui_font_families =
@@ -433,6 +438,24 @@ fn normalized_volume(value: f32, fallback: f32) -> f32 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bluetooth_settings_preserve_old_configs_and_bound_offsets() {
+        let old: AppSettings = serde_json::from_str(r#"{"volume":0.5}"#).unwrap();
+        assert!(!old.bluetooth_lyrics_enabled);
+        assert_eq!(old.bluetooth_lyrics_offset_ms, 0);
+        let configured = AppSettings {
+            bluetooth_lyrics_enabled: true,
+            bluetooth_lyrics_offset_ms: i32::MIN,
+            ..old
+        }
+        .normalized();
+        assert_eq!(configured.bluetooth_lyrics_offset_ms, -3000);
+        let saved = serde_json::to_string(&configured).unwrap();
+        let restored: AppSettings = serde_json::from_str(&saved).unwrap();
+        assert!(restored.bluetooth_lyrics_enabled);
+        assert_eq!(restored.bluetooth_lyrics_offset_ms, -3000);
+    }
+
     fn track(mid: &str) -> Track {
         Track {
             song_id: None,
@@ -495,6 +518,8 @@ mod tests {
     #[test]
     fn persisted_volumes_are_clamped() {
         let settings = AppSettings {
+            bluetooth_lyrics_enabled: false,
+            bluetooth_lyrics_offset_ms: 0,
             volume: 2.,
             last_nonzero_volume: -1.,
             color_theme: ColorTheme::CatppuccinMocha,
@@ -533,6 +558,8 @@ mod tests {
         ));
         let path = directory.join("settings.json");
         let expected = AppSettings {
+            bluetooth_lyrics_enabled: true,
+            bluetooth_lyrics_offset_ms: -200,
             volume: 0.37,
             last_nonzero_volume: 0.64,
             color_theme: ColorTheme::EverforestDark,
@@ -574,6 +601,14 @@ mod tests {
         SettingsStore::save_to(&path, &expected).expect("save settings");
         let restored = SettingsStore::load_from(&path).expect("load settings");
 
+        assert_eq!(
+            restored.bluetooth_lyrics_enabled,
+            expected.bluetooth_lyrics_enabled
+        );
+        assert_eq!(
+            restored.bluetooth_lyrics_offset_ms,
+            expected.bluetooth_lyrics_offset_ms
+        );
         assert_eq!(restored.volume, expected.volume);
         assert_eq!(restored.last_nonzero_volume, expected.last_nonzero_volume);
         assert_eq!(restored.color_theme, expected.color_theme);
