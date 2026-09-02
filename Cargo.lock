@@ -4028,6 +4028,7 @@ dependencies = [
  "tray-icon",
  "wana_kana",
  "xxhash-rust",
+ "zbus",
 ]
 
 [[package]]
