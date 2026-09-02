@@ -115,3 +115,34 @@ BlueZ 的播放器注册按适配器生效：同一适配器上的其他蓝牙�
 若同时运行其他 AVRCP/MPRIS 转发程序，可能出现播放器选择冲突；可先关闭其他
 转发程序，再关闭并重新开启本功能。系统 D-Bus 权限错误会显示在设置页，勿以
 root 身份运行播放器。实际中文显示、设备刷新速度和固件兼容性需要实机验证。
+
+
+## Fedora / KDE 安装包
+
+本地增强版可打包为 RPM。安装后程序位于 `/usr/bin/lyrune`，应用程序启动器中
+显示「Lyrune」，包含中文说明和 PNG 程序图标。蓝牙歌词设置、账号及歌单沿用
+现有用户数据。RPM 按构建主机生成依赖，请在相同 Fedora 版本和架构上安装。
+
+在已有 Rust 和系统编译依赖的基础上，安装打包工具并构建：
+
+```bash
+sudo dnf install rpm-build ImageMagick desktop-file-utils python3
+bash packaging/rpm/build-rpm.sh
+```
+
+安装包输出到 `dist/`。若刚完成 release 构建，可使用
+`bash packaging/rpm/build-rpm.sh --no-build` 直接打包现有二进制。
+
+在 Fedora 44 x86_64 上安装本次版本：
+
+```bash
+bash packaging/rpm/install-rpm.sh dist/lyrune-1.3.0-1.pixelbar.fc44.x86_64.rpm
+```
+
+安装脚本以普通用户运行，通过 sudo 调用 DNF 安装软件及依赖。它会备份本仓库
+先前生成的用户级源码启动项，让系统级启动项生效；其他自定义启动项会保留。
+如果旧版正在运行，请先从托盘退出，再从应用程序启动器搜索「Lyrune」打开。
+
+也可直接双击 RPM 交给 Discover 安装，或使用 `sudo dnf install ./dist/文件名.rpm`。
+如果存在指向源码目录的用户启动项，建议使用上面的安装脚本完成迁移。
+卸载使用 `sudo dnf remove lyrune`，个人设置、账号和缓存保留在用户目录。

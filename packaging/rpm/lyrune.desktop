@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Lyrune
+GenericName=Music Player
+GenericName[zh_CN]=音乐播放器
+Comment=QQ Music player with PixelBar Bluetooth lyrics
+Comment[zh_CN]=QQ 音乐播放器，支持 PixelBar 蓝牙歌词
+Exec=/usr/bin/lyrune
+TryExec=/usr/bin/lyrune
+Icon=/usr/share/icons/hicolor/256x256/apps/lyrune.png
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=Music;Audio;Player;QQ Music;Lyrics;
+Keywords[zh_CN]=音乐;QQ音乐;歌词;蓝牙;PixelBar;
+StartupNotify=true
+StartupWMClass=lyrune
