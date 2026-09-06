@@ -136,7 +136,7 @@ bash packaging/rpm/build-rpm.sh
 在 Fedora 44 x86_64 上安装本次版本：
 
 ```bash
-bash packaging/rpm/install-rpm.sh dist/lyrune-1.3.0-1.pixelbar.fc44.x86_64.rpm
+bash packaging/rpm/install-rpm.sh dist/lyrune-1.3.0-2.pixelbar.fc44.x86_64.rpm
 ```
 
 安装脚本以普通用户运行，通过 sudo 调用 DNF 安装软件及依赖。它会备份本仓库

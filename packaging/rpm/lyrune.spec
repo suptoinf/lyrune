@@ -3,7 +3,7 @@
 
 Name:           lyrune
 Version:        %{lyrune_version}
-Release:        1.pixelbar%{?dist}
+Release:        2.pixelbar%{?dist}
 Summary:        Native QQ Music player with PixelBar Bluetooth lyrics
 License:        LicenseRef-Unknown
 URL:            https://github.com/amtoaer/lyrune

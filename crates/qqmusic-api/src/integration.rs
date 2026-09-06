@@ -105,7 +105,10 @@ impl CredentialSession {
         if !credential.is_expiring() {
             return Ok(credential);
         }
-        credential.validate_refresh_fields()?;
+        if let Err(error) = credential.validate_refresh_fields() {
+            self.revoke();
+            return Err(error.into());
+        }
 
         let refreshed = Arc::new(refresh(credential.as_ref().clone()).await?);
         let previous = self
@@ -716,6 +719,7 @@ mod tests {
     #[tokio::test]
     async fn credential_session_rejects_incomplete_legacy_refresh_without_requesting() {
         let session = CredentialSession::new(credential_from_old_storage(2));
+        let mut updates = session.subscribe();
         let result = session
             .ensure_fresh_with(|_| async { panic!("invalid credential must not be refreshed") })
             .await;
@@ -728,6 +732,8 @@ mod tests {
             error.to_string(),
             "QQ 音乐凭证已过期，且 Lyrune 旧版本保存的凭据缺少必要字段，请重新登录"
         );
+        assert!(session.snapshot().is_none());
+        assert!(updates.changed().await.is_ok());
     }
 
     #[tokio::test]
