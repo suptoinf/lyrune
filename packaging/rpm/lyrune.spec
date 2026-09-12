@@ -1,4 +1,4 @@
-%{!?lyrune_version:%global lyrune_version 1.3.0}
+%{!?lyrune_version:%global lyrune_version 1.3.1}
 %global debug_package %{nil}
 
 Name:           lyrune

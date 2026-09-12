@@ -9,7 +9,9 @@ use gpui::{
     Styled as _, Window, div, img, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IndexPath, StyledExt as _, h_flex,
+    ActiveTheme as _, IndexPath, StyledExt as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
     list::{ListDelegate, ListItem, ListState},
     table::{Column, TableDelegate, TableState},
     v_flex,
@@ -20,6 +22,7 @@ use qqmusic_api::integration::{SearchAlbum, SearchArtist, Track, UserPlaylist, U
 pub enum TrackTableEvent {
     Artist(SearchArtist),
     Album(SearchAlbum),
+    Enqueue(Track),
     Unlike(Track),
 }
 
@@ -569,40 +572,69 @@ impl TableDelegate for TrackTableDelegate {
                 let hover_background = cx.theme().muted;
                 let duration = format_duration(track.duration_seconds);
                 h_flex()
+                    .relative()
                     .w_full()
                     .h_full()
                     .justify_end()
-                    .gap_1()
                     .text_right()
                     .text_color(cx.theme().muted_foreground)
-                    .when(self.show_liked_actions, |cell| {
-                        cell.child(
-                            div()
-                                .id(("unlike-track", row_ix))
-                                .size(px(28.))
-                                .flex_shrink_0()
-                                .rounded_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .opacity(0.)
-                                .group_hover(group, |style| style.opacity(1.))
-                                .cursor_pointer()
-                                .hover(move |style| style.bg(hover_background))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    let _ = sender
-                                        .try_send(TrackTableEvent::Unlike(track.as_ref().clone()));
-                                })
-                                .child(media_icon_hsla(
-                                    MediaIcon::HeartFilled,
-                                    cx.theme().danger,
-                                    px(16.),
-                                )),
-                        )
-                    })
-                    .child(duration)
+                    .child(
+                        div()
+                            .group_hover(group.clone(), |style| style.opacity(0.))
+                            .child(duration),
+                    )
+                    .child(
+                        h_flex()
+                            .absolute()
+                            .right_0()
+                            .gap_1()
+                            .opacity(0.)
+                            .group_hover(group, |style| style.opacity(1.))
+                            .child({
+                                let sender = sender.clone();
+                                let track = track.clone();
+                                Button::new(("enqueue-track", row_ix))
+                                    .ghost()
+                                    .rounded_full()
+                                    .size(px(28.))
+                                    .p_0()
+                                    .tooltip("添加为下一首")
+                                    .hover(move |style| style.bg(hover_background))
+                                    .on_click(move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        let _ = sender.try_send(TrackTableEvent::Enqueue(
+                                            track.as_ref().clone(),
+                                        ));
+                                    })
+                                    .child(media_icon_hsla(
+                                        MediaIcon::PlayNext,
+                                        cx.theme().foreground,
+                                        px(16.),
+                                    ))
+                            })
+                            .when(self.show_liked_actions, |actions| {
+                                actions.child(
+                                    Button::new(("unlike-track", row_ix))
+                                        .ghost()
+                                        .rounded_full()
+                                        .size(px(28.))
+                                        .p_0()
+                                        .tooltip("取消喜欢")
+                                        .hover(move |style| style.bg(hover_background))
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            let _ = sender.try_send(TrackTableEvent::Unlike(
+                                                track.as_ref().clone(),
+                                            ));
+                                        })
+                                        .child(media_icon_hsla(
+                                            MediaIcon::HeartFilled,
+                                            cx.theme().danger,
+                                            px(16.),
+                                        )),
+                                )
+                            }),
+                    )
                     .into_any_element()
             }
             _ => div().into_any_element(),

@@ -1940,6 +1940,59 @@ fn insert_external_track_after_current(
     index
 }
 
+fn enqueue_track_after_current(
+    queue: &mut PlaybackQueue,
+    current_index: Option<usize>,
+    track: Arc<Track>,
+) -> bool {
+    let Some(mut current_index) = current_index.filter(|index| *index < queue.tracks.len()) else {
+        return false;
+    };
+    if queue.tracks[current_index].mid == track.mid {
+        return false;
+    }
+    if let Some(existing_index) = queue
+        .tracks
+        .iter()
+        .position(|queued| queued.mid == track.mid)
+    {
+        queue.tracks.remove(existing_index);
+        if existing_index < current_index {
+            current_index -= 1;
+        }
+    }
+    queue.tracks.insert(current_index + 1, track);
+    queue.modified = true;
+    true
+}
+
+fn remove_up_next_track(
+    queue: &mut PlaybackQueue,
+    current_index: Option<usize>,
+    target_index: usize,
+) -> bool {
+    let Some(current_index) = current_index.filter(|index| *index < queue.tracks.len()) else {
+        return false;
+    };
+    if target_index <= current_index || target_index >= queue.tracks.len() {
+        return false;
+    }
+    queue.tracks.remove(target_index);
+    queue.modified = true;
+    true
+}
+
+fn clear_up_next_tracks(queue: &mut PlaybackQueue, current_index: Option<usize>) -> usize {
+    let Some(current_index) = current_index.filter(|index| *index < queue.tracks.len()) else {
+        return 0;
+    };
+    let previous_len = queue.tracks.len();
+    queue.tracks.truncate(current_index + 1);
+    queue.modified = true;
+    queue.continuation = None;
+    previous_len - queue.tracks.len()
+}
+
 fn canonical_queue_track_index(
     queue: &PlaybackQueue,
     playlist_id: &UserPlaylistId,
@@ -2258,6 +2311,7 @@ pub struct LyruneView {
     image_cache_capacity_input: Entity<InputState>,
     navigation_history_limit_input: Entity<InputState>,
     settings_scroll_handle: ScrollHandle,
+    playback_queue_scroll_handle: ScrollHandle,
     progress_slider: Entity<SliderState>,
     volume_slider: Entity<SliderState>,
     image_cache: Entity<CachedImageCache>,
@@ -2280,6 +2334,8 @@ pub struct LyruneView {
     active_quality: Quality,
     available_qualities: Vec<Quality>,
     quality_menu_open: bool,
+    playback_queue_open: bool,
+    playback_queue_clear_armed: bool,
     position: Duration,
     seek_preview: Option<Duration>,
     progress_hovered: bool,
@@ -2551,6 +2607,9 @@ impl LyruneView {
                         TrackTableEvent::Album(album) => {
                             this.open_home_playlist(album.into_playlist(), window, cx)
                         }
+                        TrackTableEvent::Enqueue(track) => {
+                            this.enqueue_track_from_current_playlist(track, cx)
+                        }
                         TrackTableEvent::Unlike(track) => this.unlike_track(track, cx),
                     })
                     .is_err()
@@ -2600,6 +2659,7 @@ impl LyruneView {
             image_cache_capacity_input,
             navigation_history_limit_input,
             settings_scroll_handle: ScrollHandle::new(),
+            playback_queue_scroll_handle: ScrollHandle::new(),
             progress_slider,
             volume_slider,
             image_cache,
@@ -2621,6 +2681,8 @@ impl LyruneView {
             active_quality: playback_quality,
             available_qualities: Vec::new(),
             quality_menu_open: false,
+            playback_queue_open: false,
+            playback_queue_clear_armed: false,
             position: Duration::ZERO,
             seek_preview: None,
             progress_hovered: false,
@@ -3705,6 +3767,7 @@ impl LyruneView {
 
         self.pending_playback_restore = None;
         self.home_recommendation_loading = None;
+        self.playback_queue_clear_armed = false;
         let current_index = self.current_track;
         let queue_index = if let Some(queue) = &mut self.playback_queue {
             insert_external_track_after_current(queue, current_index, track)
@@ -3848,6 +3911,7 @@ impl LyruneView {
                         this.queue_generation = this.queue_generation.wrapping_add(1);
                         this.queue_recommendation_loading = false;
                         this.queue_waiting_for_recommendation = false;
+                        this.playback_queue_clear_armed = false;
                         this.playback_queue = Some(PlaybackQueue {
                             playlist_id: UserPlaylistId::Recommendation { kind },
                             tracks: share_items(tracks),
@@ -3935,6 +3999,7 @@ impl LyruneView {
                 this.queue_recommendation_loading = false;
                 match result {
                     Ok((tracks, continuation)) => {
+                        this.playback_queue_clear_armed = false;
                         let mut first_added = None;
                         if let Some(queue) = &mut this.playback_queue {
                             queue.continuation = continuation;
@@ -4662,6 +4727,7 @@ impl LyruneView {
             self.queue_generation = self.queue_generation.wrapping_add(1);
             self.queue_recommendation_loading = false;
             self.queue_waiting_for_recommendation = false;
+            self.playback_queue_clear_armed = false;
             self.playback_queue = Some(PlaybackQueue {
                 playlist_id: restore.playlist_id,
                 tracks: restore.queue_tracks,
@@ -4702,6 +4768,7 @@ impl LyruneView {
         });
         self.queue_recommendation_loading = false;
         self.queue_waiting_for_recommendation = false;
+        self.playback_queue_clear_armed = false;
 
         if !has_more {
             return;
@@ -4761,6 +4828,7 @@ impl LyruneView {
                     return;
                 }
                 if let (Some(queue), Ok(tracks)) = (&mut this.playback_queue, result) {
+                    this.playback_queue_clear_armed = false;
                     for track in &tracks {
                         if !queue.tracks.iter().any(|item| item.mid == track.mid) {
                             queue.tracks.push(track.clone());
@@ -5006,6 +5074,7 @@ impl LyruneView {
         else {
             return;
         };
+        self.playback_queue_clear_armed = false;
         let Some(audio_cache) = self.audio_cache.clone() else {
             self.status = StatusMessage::error("音频缓存不可用，无法创建播放流");
             cx.notify();
@@ -5058,6 +5127,9 @@ impl LyruneView {
         let generation = self.play_generation;
         self.current_track = Some(index);
         self.loading_track = Some(index);
+        if self.playback_queue_open {
+            self.playback_queue_scroll_handle.scroll_to_item(index + 2);
+        }
         self.ensure_track_like_state(track.mid.clone(), cx);
         self.loading_autoplay = autoplay;
         self.resolving_qualities = reused_urls.is_none() && known_qualities.is_empty();
@@ -5752,9 +5824,160 @@ impl LyruneView {
     }
 
     fn dismiss_popovers(&mut self, cx: &mut Context<Self>) {
-        if self.account_menu_open || self.quality_menu_open {
+        if self.account_menu_open || self.quality_menu_open || self.playback_queue_open {
             self.account_menu_open = false;
             self.quality_menu_open = false;
+            self.playback_queue_open = false;
+            self.playback_queue_clear_armed = false;
+            cx.notify();
+        }
+    }
+
+    fn toggle_playback_queue_popover(&mut self, cx: &mut Context<Self>) {
+        self.playback_queue_open = !self.playback_queue_open;
+        self.playback_queue_clear_armed = false;
+        if self.playback_queue_open {
+            self.account_menu_open = false;
+            self.quality_menu_open = false;
+            if let Some(current_index) = self.current_track {
+                self.playback_queue_scroll_handle
+                    .scroll_to_item(current_index + 2);
+            }
+        }
+        cx.notify();
+    }
+
+    fn play_playback_queue_track(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.playback_queue_clear_armed = false;
+        if self.current_track == Some(index) {
+            if self.loading_track.is_none() {
+                self.toggle_playback(cx);
+            }
+        } else {
+            self.start_playback(index, Duration::ZERO, None, true, cx);
+        }
+    }
+
+    fn enqueue_track_from_current_playlist(&mut self, track: Track, cx: &mut Context<Self>) {
+        let source_playlist_id = self
+            .selected_playlist
+            .as_ref()
+            .map(|playlist| playlist.id.clone())
+            .unwrap_or_else(|| UserPlaylistId::Search {
+                query: "播放队列".to_owned(),
+            });
+        self.enqueue_track(Arc::new(track), source_playlist_id, cx);
+    }
+
+    fn enqueue_track(
+        &mut self,
+        track: Arc<Track>,
+        source_playlist_id: UserPlaylistId,
+        cx: &mut Context<Self>,
+    ) {
+        let has_active_queue = self.current_track.is_some_and(|index| {
+            self.playback_queue
+                .as_ref()
+                .is_some_and(|queue| index < queue.tracks.len())
+        });
+        if has_active_queue {
+            let title = track.title.clone();
+            let current_mid = self.current_track_data().map(|track| track.mid.clone());
+            let loading_mid = self
+                .loading_track
+                .and_then(|index| self.playback_queue.as_ref()?.tracks.get(index))
+                .map(|track| track.mid.clone());
+            let enqueued = self
+                .playback_queue
+                .as_mut()
+                .is_some_and(|queue| enqueue_track_after_current(queue, self.current_track, track));
+            self.playback_queue_clear_armed = false;
+            self.status = StatusMessage::info(if enqueued {
+                format!("已将“{title}”设为下一首")
+            } else {
+                format!("正在播放“{title}”")
+            });
+            if enqueued {
+                if let Some(queue) = &self.playback_queue {
+                    self.current_track = current_mid
+                        .as_deref()
+                        .and_then(|mid| queue.tracks.iter().position(|track| track.mid == mid));
+                    self.loading_track = loading_mid
+                        .as_deref()
+                        .and_then(|mid| queue.tracks.iter().position(|track| track.mid == mid));
+                }
+                if self.playback_queue_open
+                    && let Some(current_index) = self.current_track
+                {
+                    self.playback_queue_scroll_handle
+                        .scroll_to_item(current_index + 2);
+                }
+                self.persist_current_playback();
+                self.sync_table_playback_state(cx);
+                #[cfg(target_os = "linux")]
+                self.sync_mpris(false);
+            }
+            cx.notify();
+            return;
+        }
+
+        self.pending_playback_restore = None;
+        self.queue_generation = self.queue_generation.wrapping_add(1);
+        self.queue_recommendation_loading = false;
+        self.queue_waiting_for_recommendation = false;
+        self.playback_queue_clear_armed = false;
+        self.playback_queue = Some(PlaybackQueue {
+            playlist_id: source_playlist_id,
+            tracks: vec![track],
+            modified: true,
+            continuation: None,
+        });
+        self.start_playback(0, Duration::ZERO, None, true, cx);
+    }
+
+    fn remove_playback_queue_track(&mut self, index: usize, cx: &mut Context<Self>) {
+        let removed = self
+            .playback_queue
+            .as_mut()
+            .is_some_and(|queue| remove_up_next_track(queue, self.current_track, index));
+        if !removed {
+            return;
+        }
+        self.playback_queue_clear_armed = false;
+        self.persist_current_playback();
+        self.sync_table_playback_state(cx);
+        #[cfg(target_os = "linux")]
+        self.sync_mpris(false);
+        cx.notify();
+        self.maybe_load_queue_recommendations(false, cx);
+    }
+
+    fn clear_playback_queue_up_next(&mut self, cx: &mut Context<Self>) {
+        let removed = self
+            .playback_queue
+            .as_mut()
+            .map_or(0, |queue| clear_up_next_tracks(queue, self.current_track));
+        if removed == 0 {
+            self.playback_queue_clear_armed = false;
+            cx.notify();
+            return;
+        }
+        self.queue_generation = self.queue_generation.wrapping_add(1);
+        self.queue_recommendation_loading = false;
+        self.queue_waiting_for_recommendation = false;
+        self.playback_queue_clear_armed = false;
+        self.persist_current_playback();
+        self.sync_table_playback_state(cx);
+        #[cfg(target_os = "linux")]
+        self.sync_mpris(false);
+        cx.notify();
+    }
+
+    fn request_clear_playback_queue_up_next(&mut self, cx: &mut Context<Self>) {
+        if self.playback_queue_clear_armed {
+            self.clear_playback_queue_up_next(cx);
+        } else {
+            self.playback_queue_clear_armed = true;
             cx.notify();
         }
     }
@@ -6298,6 +6521,8 @@ impl LyruneView {
         self.active_quality = self.settings.playback_quality;
         self.available_qualities.clear();
         self.quality_menu_open = false;
+        self.playback_queue_open = false;
+        self.playback_queue_clear_armed = false;
         self.position = Duration::ZERO;
         self.account_menu_open = false;
         self.clear_persisted_playback();
@@ -6423,6 +6648,8 @@ impl LyruneView {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.account_menu_open = !this.account_menu_open;
                         this.quality_menu_open = false;
+                        this.playback_queue_open = false;
+                        this.playback_queue_clear_armed = false;
                         cx.notify();
                     }))
                     .child(avatar),
@@ -8051,6 +8278,18 @@ impl LyruneView {
             .and_then(|index| self.playback_queue.as_ref()?.tracks.get(index))
             .map(|track| track.mid.clone());
         let is_playing = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
+        let source_playlist_id = match source {
+            SongRowSource::Search => UserPlaylistId::Search {
+                query: self.search_query.clone(),
+            },
+            SongRowSource::Artist => self
+                .selected_artist
+                .clone()
+                .map(|artist| artist.into_playlist().id)
+                .unwrap_or_else(|| UserPlaylistId::Search {
+                    query: "歌手单曲".to_owned(),
+                }),
+        };
         let rows = songs
             .into_iter()
             .enumerate()
@@ -8061,6 +8300,15 @@ impl LyruneView {
                 let artists = track.artists.clone();
                 let album = track.album.clone();
                 let duration = format_duration(track.duration_seconds);
+                let row_group = format!(
+                    "{}-song-row-{index}",
+                    match source {
+                        SongRowSource::Search => "search",
+                        SongRowSource::Artist => "artist",
+                    }
+                );
+                let enqueue_track = track.clone();
+                let enqueue_source = source_playlist_id.clone();
                 let cover = self.render_search_cover(
                     track.cover_url.clone(),
                     MediaIcon::Music,
@@ -8087,6 +8335,8 @@ impl LyruneView {
                 .tooltip(format!("播放 {title}"))
                 .child(
                     h_flex()
+                        .id(row_group.clone())
+                        .group(row_group.clone())
                         .size_full()
                         .gap_3()
                         .child(
@@ -8156,6 +8406,36 @@ impl LyruneView {
                                     .child(album),
                             )
                         })
+                        .child(
+                            div()
+                                .id(("enqueue-song-row", index))
+                                .size(px(32.))
+                                .flex_shrink_0()
+                                .opacity(0.)
+                                .group_hover(row_group, |style| style.opacity(1.))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(
+                                    Button::new(("enqueue-song", index))
+                                        .ghost()
+                                        .rounded_full()
+                                        .size(px(32.))
+                                        .p_0()
+                                        .tooltip("添加为下一首")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.enqueue_track(
+                                                enqueue_track.clone(),
+                                                enqueue_source.clone(),
+                                                cx,
+                                            );
+                                        }))
+                                        .child(media_icon_hsla(
+                                            MediaIcon::PlayNext,
+                                            theme.foreground,
+                                            px(17.),
+                                        )),
+                                ),
+                        )
                         .child(
                             div()
                                 .w(px(52.))
@@ -8626,6 +8906,8 @@ impl LyruneView {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.quality_menu_open = !this.quality_menu_open;
                         this.account_menu_open = false;
+                        this.playback_queue_open = false;
+                        this.playback_queue_clear_armed = false;
                         cx.notify();
                     })),
             )
@@ -8659,6 +8941,323 @@ impl LyruneView {
                     .with_priority(20),
                 )
             })
+            .into_any_element()
+    }
+
+    fn render_playback_queue_track_row(
+        &mut self,
+        index: usize,
+        track: Arc<Track>,
+        played: bool,
+        removable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let is_current = self.current_track == Some(index);
+        let is_loading = self.loading_track == Some(index);
+        let is_playing = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
+        let group = format!("playback-queue-row-{index}");
+        let title_color = if is_current {
+            theme.primary
+        } else if played {
+            theme.muted_foreground
+        } else {
+            theme.foreground
+        };
+        let current_background = theme.primary.opacity(0.12);
+        let row_hover = if is_current {
+            theme.primary.opacity(0.16)
+        } else {
+            theme.muted
+        };
+        let danger = theme.danger;
+        let leading = if is_current {
+            media_icon_hsla(
+                if is_loading {
+                    MediaIcon::Loading
+                } else if is_playing {
+                    MediaIcon::Pause
+                } else {
+                    MediaIcon::Play
+                },
+                theme.primary,
+                px(16.),
+            )
+        } else {
+            h_flex()
+                .relative()
+                .size(px(20.))
+                .justify_center()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(
+                    div()
+                        .group_hover(group.clone(), |style| style.opacity(0.))
+                        .child((index + 1).to_string()),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity(0.)
+                        .group_hover(group.clone(), |style| style.opacity(1.))
+                        .child(media_icon_hsla(MediaIcon::Play, theme.foreground, px(15.))),
+                )
+                .into_any_element()
+        };
+        let duration = format_duration(track.duration_seconds);
+
+        h_flex()
+            .id(("playback-queue-track", index))
+            .group(group.clone())
+            .h(px(48.))
+            .mx_2()
+            .px_2()
+            .gap_2()
+            .rounded(px(8.))
+            .cursor_pointer()
+            .when(is_current, |row| row.bg(current_background))
+            .hover(move |style| style.bg(row_hover))
+            .child(div().w(px(20.)).flex_shrink_0().child(leading))
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .gap(px(1.))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_sm()
+                            .font_medium()
+                            .text_color(title_color)
+                            .child(track.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(track.artists.clone()),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(duration)
+                    .when(removable, |actions| {
+                        actions.child(
+                            div()
+                                .id(("remove-playback-queue-track", index))
+                                .size(px(28.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .opacity(0.)
+                                .group_hover(group, |style| style.opacity(1.))
+                                .cursor_pointer()
+                                .hover(move |style| style.bg(danger.opacity(0.12)))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.remove_playback_queue_track(index, cx);
+                                }))
+                                .child(media_icon_hsla(MediaIcon::Close, danger, px(15.))),
+                        )
+                    }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.play_playback_queue_track(index, cx)))
+            .into_any_element()
+    }
+
+    fn render_playback_queue_popover(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let tracks = self
+            .playback_queue
+            .as_ref()
+            .map(|queue| queue.tracks.clone())
+            .unwrap_or_default();
+        let current_index = self.current_track.filter(|index| *index < tracks.len());
+
+        let content = if let Some(current_index) = current_index {
+            let up_next_count = tracks.len().saturating_sub(current_index + 1);
+            let mut rows = Vec::with_capacity(tracks.len() + 4);
+            rows.push(
+                div()
+                    .h(px(36.))
+                    .px_4()
+                    .pt_3()
+                    .text_xs()
+                    .font_medium()
+                    .text_color(theme.muted_foreground)
+                    .child("播放历史")
+                    .into_any_element(),
+            );
+            for (index, track) in tracks.iter().take(current_index).cloned().enumerate() {
+                rows.push(self.render_playback_queue_track_row(index, track, true, false, cx));
+            }
+            rows.push(
+                div()
+                    .h(px(36.))
+                    .px_4()
+                    .pt_3()
+                    .text_xs()
+                    .font_medium()
+                    .text_color(theme.muted_foreground)
+                    .child("正在播放")
+                    .into_any_element(),
+            );
+            rows.push(self.render_playback_queue_track_row(
+                current_index,
+                tracks[current_index].clone(),
+                false,
+                false,
+                cx,
+            ));
+
+            let clear_armed = self.playback_queue_clear_armed;
+            rows.push(
+                h_flex()
+                    .h(px(42.))
+                    .px_4()
+                    .pt_2()
+                    .justify_between()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(theme.muted_foreground)
+                            .child("接下来")
+                            .child(format!("{up_next_count} 首")),
+                    )
+                    .when(up_next_count > 0, |header| {
+                        header.child(
+                            Button::new("clear-playback-queue-up-next")
+                                .label(if clear_armed {
+                                    "确认清空"
+                                } else {
+                                    "清空待播"
+                                })
+                                .ghost()
+                                .when(clear_armed, |button| button.danger())
+                                .h(px(28.))
+                                .px_2()
+                                .text_size(px(11.))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.request_clear_playback_queue_up_next(cx);
+                                })),
+                        )
+                    })
+                    .into_any_element(),
+            );
+            if up_next_count == 0 {
+                rows.push(
+                    h_flex()
+                        .h(px(48.))
+                        .px_4()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("接下来暂无歌曲")
+                        .into_any_element(),
+                );
+            } else {
+                for (index, track) in tracks
+                    .iter()
+                    .enumerate()
+                    .skip(current_index + 1)
+                    .map(|(index, track)| (index, track.clone()))
+                {
+                    rows.push(self.render_playback_queue_track_row(index, track, false, true, cx));
+                }
+            }
+            let desired_height = 58. + rows.len() as f32 * 48.;
+            let max_height = f32::from(window.viewport_size().height) * 0.6;
+            v_flex()
+                .h(px(desired_height.min(max_height).max(220.)))
+                .child(
+                    h_flex()
+                        .h(px(58.))
+                        .flex_shrink_0()
+                        .px_4()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .font_semibold()
+                        .child("播放队列"),
+                )
+                .child(
+                    v_flex()
+                        .id("playback-queue-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .track_scroll(&self.playback_queue_scroll_handle)
+                        .overflow_y_scrollbar()
+                        .children(rows),
+                )
+                .into_any_element()
+        } else {
+            v_flex()
+                .h(px(190.))
+                .child(
+                    h_flex()
+                        .h(px(58.))
+                        .flex_shrink_0()
+                        .px_4()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .font_semibold()
+                        .child("播放队列"),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .px_6()
+                        .text_center()
+                        .child(div().font_medium().child("暂无播放队列"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("从歌单或搜索结果中播放歌曲后，将在这里显示"),
+                        ),
+                )
+                .into_any_element()
+        };
+
+        div()
+            .id("playback-queue-popover")
+            .absolute()
+            .bottom(px(50.))
+            .left(px(-168.))
+            .w(px(380.))
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .shadow_lg()
+            .overflow_hidden()
+            .occlude()
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.playback_queue_clear_armed {
+                    this.playback_queue_clear_armed = false;
+                    cx.notify();
+                }
+            }))
+            .child(content)
             .into_any_element()
     }
 
@@ -9277,6 +9876,11 @@ impl LyruneView {
         let has_track = track.is_some();
         let quality_selector = self.render_quality_selector(has_track, cx);
         let progress = self.render_player_progress(has_track, narrow, window, cx);
+        let playback_queue_popover = if self.playback_queue_open {
+            Some(self.render_playback_queue_popover(window, cx))
+        } else {
+            None
+        };
         let theme = cx.theme();
         let is_playing = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
         let loading = self.loading_track.is_some();
@@ -9683,6 +10287,48 @@ impl LyruneView {
                                                 .bg(theme.primary),
                                         )
                                     }),
+                            )
+                            .child(
+                                div()
+                                    .relative()
+                                    .child(
+                                        Button::new("playback-queue")
+                                            .ghost()
+                                            .rounded(px(999.))
+                                            .size(px(44.))
+                                            .p_0()
+                                            .tooltip("播放队列")
+                                            .toggled(self.playback_queue_open)
+                                            .selected(self.playback_queue_open)
+                                            .child(div().w(px(28.)).flex().justify_center().child(
+                                                media_icon(
+                                                    MediaIcon::Playlist,
+                                                    if self.playback_queue_open {
+                                                        icon_accent
+                                                    } else {
+                                                        icon_foreground
+                                                    },
+                                                    px(19.),
+                                                ),
+                                            ))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggle_playback_queue_popover(cx)
+                                            })),
+                                    )
+                                    .when(self.playback_queue_open, |this| {
+                                        this.child(
+                                            div()
+                                                .absolute()
+                                                .bottom(px(1.))
+                                                .left(px(21.))
+                                                .size(px(3.))
+                                                .rounded_full()
+                                                .bg(theme.primary),
+                                        )
+                                    })
+                                    .when_some(playback_queue_popover, |this, popover| {
+                                        this.child(deferred(popover).with_priority(20))
+                                    }),
                             ),
                     ),
             )
@@ -9752,7 +10398,8 @@ impl LyruneView {
         let compact = window.viewport_size().width < px(1120.);
         let narrow = window.viewport_size().width < px(900.);
         let scale_factor = window.scale_factor();
-        let popover_open = self.account_menu_open || self.quality_menu_open;
+        let popover_open =
+            self.account_menu_open || self.quality_menu_open || self.playback_queue_open;
         if self.cover_backdrop_fully_expanded {
             return v_flex()
                 .relative()
@@ -10023,11 +10670,12 @@ mod tests {
         DEFAULT_NAVIGATION_HISTORY_LIMIT, LYRIC_MINIMUM_CONTRAST, LyricFrameRate,
         NavigationHistory, NavigationPage, PlaybackQueue, PlaylistResource, PlaylistScrollPosition,
         SearchCategory, SearchResource, SearchVisibleCounts, adjacent_lyric_timing,
-        canonical_queue_track_index, combined_lyric_frame_interval, contrast_ratio,
-        extract_qrc_content, format_playback_time, insert_external_track_after_current,
-        insert_track_after_current, lyric_edge_opacity, lyric_frame_is_due,
-        lyric_horizontal_scroll_offset, lyric_position_for_frame_rate, parse_lyrics,
-        playlist_title_is_long, readable_lyric_color, resolved_playlist_scroll_row,
+        canonical_queue_track_index, clear_up_next_tracks, combined_lyric_frame_interval,
+        contrast_ratio, enqueue_track_after_current, extract_qrc_content, format_playback_time,
+        insert_external_track_after_current, insert_track_after_current, lyric_edge_opacity,
+        lyric_frame_is_due, lyric_horizontal_scroll_offset, lyric_position_for_frame_rate,
+        parse_lyrics, playlist_title_is_long, readable_lyric_color, remove_up_next_track,
+        resolved_playlist_scroll_row,
     };
     use gpui::{Pixels, Rgba, black, px, rgb};
     use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
@@ -10688,5 +11336,90 @@ mod tests {
         assert_eq!(mids(&queue.tracks), ["A", "search", "B"]);
         assert!(queue.modified);
         assert_eq!(canonical_queue_track_index(&queue, &playlist_id, "B"), None);
+    }
+
+    #[test]
+    fn enqueue_moves_the_track_after_current_and_preserves_continuation() {
+        let mut queue = PlaybackQueue {
+            playlist_id: UserPlaylistId::Liked,
+            tracks: ["A", "B", "C", "D"].map(|mid| Arc::new(track(mid))).into(),
+            modified: false,
+            continuation: Some(super::PersistedQueueContinuation::Guess),
+        };
+
+        assert!(enqueue_track_after_current(
+            &mut queue,
+            Some(1),
+            Arc::new(track("D")),
+        ));
+        assert_eq!(mids(&queue.tracks), ["A", "B", "D", "C"]);
+
+        assert!(enqueue_track_after_current(
+            &mut queue,
+            Some(1),
+            Arc::new(track("A")),
+        ));
+        assert_eq!(mids(&queue.tracks), ["B", "A", "D", "C"]);
+
+        assert!(!enqueue_track_after_current(
+            &mut queue,
+            Some(0),
+            Arc::new(track("B")),
+        ));
+        assert!(queue.modified);
+        assert_eq!(
+            queue.continuation,
+            Some(super::PersistedQueueContinuation::Guess)
+        );
+    }
+
+    #[test]
+    fn removing_up_next_keeps_the_current_track_and_history_stable() {
+        let mut queue = PlaybackQueue {
+            playlist_id: UserPlaylistId::Liked,
+            tracks: ["A", "B", "C", "D"].map(|mid| Arc::new(track(mid))).into(),
+            modified: false,
+            continuation: Some(super::PersistedQueueContinuation::Guess),
+        };
+
+        assert!(remove_up_next_track(&mut queue, Some(1), 2));
+        assert_eq!(mids(&queue.tracks), ["A", "B", "D"]);
+        assert!(queue.modified);
+        assert_eq!(
+            queue.continuation,
+            Some(super::PersistedQueueContinuation::Guess)
+        );
+    }
+
+    #[test]
+    fn removing_up_next_rejects_history_current_and_invalid_indices() {
+        let mut queue = PlaybackQueue {
+            playlist_id: UserPlaylistId::Liked,
+            tracks: ["A", "B", "C"].map(|mid| Arc::new(track(mid))).into(),
+            modified: false,
+            continuation: None,
+        };
+
+        assert!(!remove_up_next_track(&mut queue, Some(1), 0));
+        assert!(!remove_up_next_track(&mut queue, Some(1), 1));
+        assert!(!remove_up_next_track(&mut queue, Some(1), 3));
+        assert!(!remove_up_next_track(&mut queue, None, 2));
+        assert_eq!(mids(&queue.tracks), ["A", "B", "C"]);
+        assert!(!queue.modified);
+    }
+
+    #[test]
+    fn clearing_up_next_truncates_the_queue_and_stops_recommendations() {
+        let mut queue = PlaybackQueue {
+            playlist_id: UserPlaylistId::Liked,
+            tracks: ["A", "B", "C", "D"].map(|mid| Arc::new(track(mid))).into(),
+            modified: false,
+            continuation: Some(super::PersistedQueueContinuation::Guess),
+        };
+
+        assert_eq!(clear_up_next_tracks(&mut queue, Some(1)), 2);
+        assert_eq!(mids(&queue.tracks), ["A", "B"]);
+        assert!(queue.modified);
+        assert_eq!(queue.continuation, None);
     }
 }

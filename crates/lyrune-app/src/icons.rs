@@ -84,6 +84,8 @@ pub enum MediaIcon {
     HeartFilled,
     Volume,
     VolumeMuted,
+    PlayNext,
+    Close,
 }
 
 impl MediaIcon {
@@ -148,6 +150,8 @@ impl MediaIcon {
             Self::VolumeMuted => {
                 r#"<path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="m22 9-6 6"/><path d="m16 9 6 6"/>"#
             }
+            Self::PlayNext => r#"<path d="M4 3v18l14-9L4 3Z"/><path d="M14 14v8M10 18h8"/>"#,
+            Self::Close => r#"<path d="m6 6 12 12M18 6 6 18"/>"#,
         }
     }
 }
